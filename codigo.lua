@@ -34,112 +34,225 @@ import "android.net.Uri"
 import "android.content.DialogInterface"
 
 -- ==========================================
--- SISTEMA DE ACTUALIZACIÓN AUTOMÁTICA Y MANUAL
+-- SISTEMA DE ACTUALIZACIÓN AUTOMÁTICA Y MANUAL (v3.3)
 -- ==========================================
-local VERSION_ACTUAL = 3.0
--- Enlaces en su forma más pura y corta
-local URL_VERSION = "https://gist.githubusercontent.com/luissanchezbovadilla-creator/56180ab6787ac7a22af396a07ace9f34/raw" 
-local URL_CODIGO = "https://gist.githubusercontent.com/luissanchezbovadilla-creator/41599bcb45dcad7a61870cec814e6cbc/raw"
+-- IMPORTANTE: cada vez que subas una versión nueva a GitHub, cambia este número
+-- aquí dentro de codigo.lua Y también el número dentro de version.txt (deben ser iguales).
+local VERSION_ACTUAL = 3.3
+
+local GITHUB_USUARIO = "luissanchezbovadilla-creator"
+local GITHUB_REPO = "Lector.tiktok"
+-- El plugin prueba estas ramas y nombres automáticamente hasta encontrar el archivo
+local GITHUB_RAMAS = {"main", "master"}
+local NOMBRES_VERSION = {"version.txt", "version.txt.txt", "Version.txt"}
+local NOMBRES_CODIGO = {"codigo.lua", "codigo.lua.txt", "Codigo.lua"}
+
+local function listaDeEnlaces(nombres)
+    local lista = {}
+    local marca = tostring(os.time())
+    for _, rama in ipairs(GITHUB_RAMAS) do
+        for _, nombre in ipairs(nombres) do
+            table.insert(lista, "https://raw.githubusercontent.com/" .. GITHUB_USUARIO .. "/" .. GITHUB_REPO .. "/" .. rama .. "/" .. nombre .. "?t=" .. marca)
+        end
+    end
+    return lista
+end
+
+-- Prueba cada enlace de la lista y devuelve el primero que funcione
+local function abrirPrimerEnlace(lista, timeoutMs)
+    local ultimoError = ""
+    local primerErrorDeRed = ""
+    local todosNoEncontrados = true
+    for _, enlace in ipairs(lista) do
+        local ok, res = pcall(function()
+            local c = URL(enlace).openConnection()
+            c.setConnectTimeout(timeoutMs)
+            c.setReadTimeout(timeoutMs)
+            c.setUseCaches(false)
+            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+            c.setRequestProperty("Cache-Control", "no-cache")
+            return c.getInputStream()
+        end)
+        if ok and res then return res, "", false end
+        ultimoError = tostring(res)
+        if not ultimoError:find("FileNotFoundException") then
+            todosNoEncontrados = false
+            if primerErrorDeRed == "" then primerErrorDeRed = ultimoError end
+        end
+    end
+    if primerErrorDeRed ~= "" then ultimoError = primerErrorDeRed end
+    return nil, ultimoError, todosNoEncontrados
+end
+
+-- Guarda lo que llega por internet en un archivo (mismo método de la descarga de sonidos)
+local function guardarFlujoEnArchivo(is, rutaArchivo)
+    local fos = FileOutputStream(rutaArchivo)
+    local buffer = byte[4096]
+    local leido = is.read(buffer)
+    while leido > 0 do
+        fos.write(buffer, 0, leido)
+        leido = is.read(buffer)
+    end
+    fos.close()
+    is.close()
+end
+
+local function leerArchivoTexto(ruta)
+    local f = io.open(ruta, "rb")
+    if not f then return "" end
+    local t = f:read("*a")
+    f:close()
+    return t or ""
+end
+
+local function copiarArchivo(origen, destino)
+    local fis = FileInputStream(origen)
+    local fos = FileOutputStream(destino)
+    local buffer = byte[4096]
+    local leido = fis.read(buffer)
+    while leido > 0 do
+        fos.write(buffer, 0, leido)
+        leido = fis.read(buffer)
+    end
+    fos.close()
+    fis.close()
+end
+
+-- Copia el archivo nuevo junto al plugin y solo reemplaza el viejo si la copia salió completa
+local function guardarArchivoSeguro(rutaOrigen, rutaDestino)
+    local original = File(rutaOrigen)
+    local nuevo = File(rutaDestino .. ".nuevo")
+    copiarArchivo(rutaOrigen, rutaDestino .. ".nuevo")
+    if (not nuevo.exists()) or nuevo.length() ~= original.length() then
+        nuevo.delete()
+        return false
+    end
+    local destino = File(rutaDestino)
+    destino.delete()
+    if not nuevo.renameTo(destino) then
+        copiarArchivo(rutaOrigen, rutaDestino)
+        nuevo.delete()
+    end
+    local final = File(rutaDestino)
+    return final.exists() and final.length() == original.length()
+end
+
+local function decirEnPrincipal(mensaje)
+    Handler(Looper.getMainLooper()).post(Runnable({
+        run = function() service.speak(mensaje) end
+    }))
+end
 
 local function comprobarActualizacion(modoManual)
     Thread(Runnable({
         run = function()
+            local carpetaTmp = ""
+            pcall(function() carpetaTmp = tostring(service.getCacheDir().getAbsolutePath()) end)
+            if carpetaTmp == "" then carpetaTmp = Environment.getExternalStorageDirectory().getAbsolutePath() end
+            local tmpVersion = carpetaTmp .. "/ls_version.tmp"
+            local tmpCodigo = carpetaTmp .. "/ls_codigo.tmp"
+
             local exito, err = pcall(function()
-                local conexion = URL(URL_VERSION).openConnection()
-                conexion.setConnectTimeout(5000)
-                conexion.setReadTimeout(5000)
-                conexion.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                
-                local is = conexion.getInputStream()
-                local scanner = java.util.Scanner(is).useDelimiter("\\A")
-                local versionRemotaStr = scanner.hasNext() and scanner.next() or ""
-                is.close()
-                
-                local versionRemota = tonumber(versionRemotaStr:match("^%s*(.-)%s*$"))
-                
-                if versionRemota and versionRemota > VERSION_ACTUAL then
-                    Handler(Looper.getMainLooper()).post(Runnable({
-                        run = function()
-                            service.speak("Nueva versión " .. versionRemota .. " encontrada. Descargando actualización...")
-                        end
-                    }))
-                    
-                    local conCodigo = URL(URL_CODIGO).openConnection()
-                    conCodigo.setConnectTimeout(15000)
-                    conCodigo.setReadTimeout(15000)
-                    conCodigo.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                    
-                    local isCodigo = conCodigo.getInputStream()
-                    
+                -- 1) Leer el número de versión publicado en GitHub
+                local isVersion, errVersion, noEncontradoVersion = abrirPrimerEnlace(listaDeEnlaces(NOMBRES_VERSION), 8000)
+                if not isVersion then
+                    if noEncontradoVersion then error("E_VER404") end
+                    error("E_VERRED " .. tostring(errVersion))
+                end
+                guardarFlujoEnArchivo(isVersion, tmpVersion)
+                local textoVersion = leerArchivoTexto(tmpVersion)
+                File(tmpVersion).delete()
+
+                local versionRemota = tonumber(textoVersion:match("(%d+%.?%d*)"))
+                if not versionRemota then
+                    error("E_VERFMT|" .. textoVersion:gsub("%s+", " "):sub(1, 30))
+                end
+
+                if versionRemota > VERSION_ACTUAL then
+                    decirEnPrincipal("Nueva versión " .. versionRemota .. " encontrada. Descargando actualización...")
+
+                    -- 2) Descargar el código nuevo
+                    local isCodigo, errCodigo, noEncontradoCodigo = abrirPrimerEnlace(listaDeEnlaces(NOMBRES_CODIGO), 20000)
+                    if not isCodigo then
+                        if noEncontradoCodigo then error("E_COD404") end
+                        error("E_CODRED " .. tostring(errCodigo))
+                    end
+                    guardarFlujoEnArchivo(isCodigo, tmpCodigo)
+                    local textoCodigo = leerArchivoTexto(tmpCodigo)
+
+                    -- 3) Comprobar que lo descargado es realmente el plugin
+                    if #textoCodigo < 5000 or not textoCodigo:find("VERSION_ACTUAL", 1, true) then
+                        File(tmpCodigo).delete()
+                        error("E_CODFMT|" .. tostring(#textoCodigo))
+                    end
+
+                    -- 4) Buscar dónde está instalado este plugin y reemplazarlo
                     local rutaActual = ""
                     pcall(function() rutaActual = debug.getinfo(1, "S").source:match("^@?(.*)") end)
-                    
+
                     local guardado = false
-                    if rutaActual and rutaActual ~= "" then
-                        local fDestino = File(rutaActual)
-                        if fDestino.exists() then
-                            local fos = FileOutputStream(fDestino)
-                            local buffer = byte[4096]
-                            local leido = isCodigo.read(buffer)
-                            while leido > 0 do
-                                fos.write(buffer, 0, leido)
-                                leido = isCodigo.read(buffer)
-                            end
-                            fos.close()
-                            guardado = true
-                        end
+                    if rutaActual and rutaActual ~= "" and File(rutaActual).exists() then
+                        guardado = guardarArchivoSeguro(tmpCodigo, rutaActual)
                     end
-                    
+
                     if not guardado then
                         local rutaDestino = Environment.getExternalStorageDirectory().getAbsolutePath() .. "/jieshuo/plugins/Lector TikTok Pro.lua"
                         local fFallback = File(rutaDestino)
                         if fFallback.getParentFile().exists() then
-                            local fos = FileOutputStream(fFallback)
-                            local buffer = byte[4096]
-                            local leido = isCodigo.read(buffer)
-                            while leido > 0 do
-                                fos.write(buffer, 0, leido)
-                                leido = isCodigo.read(buffer)
-                            end
-                            fos.close()
+                            guardado = guardarArchivoSeguro(tmpCodigo, rutaDestino)
                         end
                     end
-                    isCodigo.close()
-                    
-                    Handler(Looper.getMainLooper()).post(Runnable({
-                        run = function()
-                            service.speak("¡Plugin actualizado con éxito a la versión " .. versionRemota .. "! Apágalo y vuelve a encenderlo para aplicar los cambios.")
-                        end
-                    }))
+                    File(tmpCodigo).delete()
+
+                    if guardado then
+                        decirEnPrincipal("¡Plugin actualizado con éxito a la versión " .. versionRemota .. "! Apágalo y vuelve a encenderlo para aplicar los cambios.")
+                    else
+                        error("E_GUARDAR")
+                    end
                 else
                     if modoManual then
-                        Handler(Looper.getMainLooper()).post(Runnable({
-                            run = function()
-                                service.speak("Ya tienes la versión más reciente, versión " .. VERSION_ACTUAL .. ".")
-                            end
-                        }))
+                        decirEnPrincipal("Ya tienes la versión más reciente. En GitHub está la versión " .. versionRemota .. " y tú tienes la " .. VERSION_ACTUAL .. ".")
                     end
                 end
             end)
-            
-            -- SISTEMA INTELIGENTE DE ERRORES PARA DETECTAR ENLACES ROTOS
+
             if not exito and modoManual then
-                local msjError = "Error desconocido."
                 local errorReal = tostring(err)
-                
-                if errorReal:find("FileNotFoundException") then
-                    msjError = "Error 404. El enlace de Gist está roto o el archivo fue borrado."
-                elseif errorReal:find("UnknownHostException") then
+                local msjError
+
+                if errorReal:find("UnknownHostException", 1, true) then
                     msjError = "No hay conexión a internet para verificar."
-                else
-                    msjError = "Error de red al conectar con el servidor."
-                end
-                
-                Handler(Looper.getMainLooper()).post(Runnable({
-                    run = function()
-                        service.speak(msjError)
+                elseif errorReal:find("E_VER404", 1, true) then
+                    msjError = "Error 404. No encontré el archivo version punto txt en tu repositorio de GitHub. Revisa que exista y que el repositorio sea público."
+                elseif errorReal:find("E_COD404", 1, true) then
+                    msjError = "Error 404. No encontré el archivo codigo punto lua en tu repositorio de GitHub."
+                elseif errorReal:find("E_VERRED", 1, true) or errorReal:find("E_CODRED", 1, true) then
+                    local nombreExc = errorReal:match("([%w%.]+Exception)") or "desconocido"
+                    if errorReal:find("SocketTimeout", 1, true) then
+                        msjError = "La conexión con GitHub tardó demasiado. Revisa tu señal e intenta de nuevo."
+                    elseif errorReal:find("SSL", 1, true) or errorReal:find("Certificate", 1, true) then
+                        msjError = "Error de seguridad al conectar con GitHub. Revisa que la fecha y la hora de tu teléfono estén correctas y en automático."
+                    else
+                        msjError = "Error de red al conectar con GitHub. Tipo de error: " .. nombreExc
                     end
-                }))
+                elseif errorReal:find("E_VERFMT|", 1, true) then
+                    local leido = errorReal:match("E_VERFMT|([^\n]*)") or ""
+                    leido = leido:gsub("^%s+", "")
+                    if leido == "" then
+                        msjError = "El archivo version punto txt de GitHub está vacío. Debe contener solo el número de versión."
+                    else
+                        msjError = "El archivo version punto txt de GitHub no tiene un número válido. Lo que leí fue: " .. leido
+                    end
+                elseif errorReal:find("E_CODFMT|", 1, true) then
+                    local peso = errorReal:match("E_CODFMT|(%d+)") or "desconocido"
+                    msjError = "Descargué codigo punto lua de GitHub pero no parece el plugin completo. Pesa " .. peso .. " bytes. Debe pesar más de cinco mil."
+                elseif errorReal:find("E_GUARDAR", 1, true) then
+                    msjError = "Descargué la actualización pero no pude guardarla en el teléfono."
+                else
+                    msjError = "Error desconocido. " .. errorReal:gsub("%s+", " "):sub(1, 150)
+                end
+
+                decirEnPrincipal(msjError)
             end
         end
     })).start()
@@ -169,7 +282,7 @@ local pref = service.getSharedPreferences("TikTokLectorConfig", 0)
 -- ==========================================
 local defaultFiltro = "mongolo|mongolito|descuartizar|descuartizador|mongola|maricon|negro|cabro|violador|asesino|sicario|veneca|veneco"
 
-local fechaExpiracion = os.time({year=2026, month=12, day=31, hour=23, min=59, sec=59})
+local fechaExpiracion = os.time({year=2027, month=12, day=31, hour=23, min=59, sec=59})
 if os.time() > fechaExpiracion then
     service.speak("Esta versión ha expirado. Por favor, contacta a LS Accesible.")
     return true
